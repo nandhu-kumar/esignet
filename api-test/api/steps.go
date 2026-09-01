@@ -253,11 +253,10 @@ func iAuthenticateAsAdmin(ctx context.Context) error {
 	s := getState(ctx)
 	// A target that does not enforce scope never inspects this token: scope
 	// middleware is only installed when both ISSUER_URL and JWKS_URL are set
-	// (cmd/esignet/main.go), so a locally started instrumented server accepts
-	// client-mgmt calls with any bearer, or none. Requiring a real Keycloak
-	// round-trip there means a deployed IAM credential decides whether the
-	// local client-mgmt scenarios run at all, to obtain a value the server
-	// then ignores.
+	// (cmd/esignet/main.go), so a locally started server accepts client-mgmt
+	// calls with any bearer, or none. Requiring a real Keycloak round-trip there
+	// means a deployed IAM credential decides whether the local client-mgmt
+	// scenarios run at all, to obtain a value the server then ignores.
 	//
 	// Deliberately an explicit opt-in rather than a fallback when Keycloak
 	// fails: falling back silently would turn a genuine auth regression on a

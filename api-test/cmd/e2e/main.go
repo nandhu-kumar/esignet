@@ -221,12 +221,12 @@ func sameOrigin(ref string, others ...string) error {
 func keycloakToken(ctx context.Context, kc config.Keycloak, tlsVerify bool) (string, error) {
 	// A target that does not enforce scope never inspects this token: scope
 	// middleware is only installed when both ISSUER_URL and JWKS_URL are set, so
-	// a locally started instrumented server accepts client registration with any
-	// bearer, or none. Requiring a real Keycloak round-trip there means a
-	// deployed IAM credential decides whether the e2e surface runs at all — and
-	// this call is fatal, so a 401 costs every scenario. Mirrors the ADMIN_TOKEN
-	// opt-in in api/steps.go; deliberately explicit rather than a fallback on
-	// Keycloak failure, so a real deployment cannot go green on a broken IAM.
+	// a locally started server accepts client registration with any bearer, or
+	// none. Requiring a real Keycloak round-trip there means a deployed IAM
+	// credential decides whether the e2e surface runs at all — and this call is
+	// fatal, so a 401 costs every scenario. Mirrors the ADMIN_TOKEN opt-in in
+	// api/steps.go; deliberately explicit rather than a fallback on Keycloak
+	// failure, so a real deployment cannot go green on a broken IAM.
 	if tok := os.Getenv("ADMIN_TOKEN"); tok != "" {
 		return tok, nil
 	}
