@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -206,6 +207,35 @@ type Run struct {
 
 	// DebugShowSecrets leaves the captured eSignet wire trace unredacted in the report and sidecar.
 	DebugShowSecrets bool `json:"debug_show_secrets"`
+
+	// Coverage measures how much of esignet-service each surface exercises.
+	Coverage Coverage `json:"coverage"`
+}
+
+// Coverage configures per-surface code-coverage measurement of the
+// esignet-service under test.
+//
+// This only works against a coverage-instrumented server
+// (esignet-service/make.sh build-cover), started with GOCOVERDIR pointing at
+// Dir. run-all.sh then resets the server's counters before each surface and
+// snapshots them after, so conformance, api and e2e each get their own
+// attributable number in addition to the union of all three. A run against an
+// ordinary deployment leaves this off — there is nothing to ask.
+type Coverage struct {
+	// Enabled turns the reset/snapshot calls on. Off by default: the endpoints
+	// do not exist in a production build, so a normal run must not call them.
+	Enabled bool `json:"enabled"`
+
+	// ControlURL is the origin serving /internal/coverage/* — the server's own
+	// root, NOT esignet.base_url, which usually carries a /v1/esignet path
+	// prefix. Defaults to the origin of esignet.base_url, which is right for the
+	// common case of a locally started instrumented binary.
+	ControlURL string `json:"control_url"`
+
+	// Dir is where snapshots land, as seen by THIS harness. It must resolve to
+	// the same directory as the server's GOCOVERDIR; when the server runs in a
+	// container that means a shared mount. Defaults to out/covdata.
+	Dir string `json:"dir"`
 }
 
 // KnownIssue names a module already known to fail.
@@ -403,8 +433,18 @@ func (c *Config) ValidateSurface(name string) error {
 		}
 		// Unlike api, e2e cannot degrade: it registers a throwaway OIDC client
 		// before it can drive anything, and that needs the admin grant.
-		if c.Keycloak.TokenURL == "" || c.Keycloak.ClientID == "" || c.Keycloak.ClientSecret == "" {
-			return fmt.Errorf("keycloak.token_url/client_id/client_secret (KEYCLOAK_*) are required for the e2e surface — it registers a test client before running")
+		//
+		// ADMIN_TOKEN satisfies that too. A target that does not enforce scope
+		// never inspects the bearer — scope middleware is only installed when
+		// both ISSUER_URL and JWKS_URL are set — so against a locally started
+		// server the Keycloak round-trip would exist only to obtain a value the
+		// server ignores, and a deployed IAM credential would decide whether the
+		// local surface runs at all. Checked here as well as at the call site so
+		// the failure names the missing setting instead of surfacing as a 401
+		// after the run has started.
+		if os.Getenv("ADMIN_TOKEN") == "" &&
+			(c.Keycloak.TokenURL == "" || c.Keycloak.ClientID == "" || c.Keycloak.ClientSecret == "") {
+			return fmt.Errorf("keycloak.token_url/client_id/client_secret (KEYCLOAK_*) are required for the e2e surface — it registers a test client before running (or set ADMIN_TOKEN for a target that does not enforce scope)")
 		}
 		if c.E2E.Spec == "" {
 			return fmt.Errorf("e2e.spec (E2E_SPEC) is required for the e2e surface — no default known for provider %q", c.Esignet.Provider)
@@ -494,6 +534,10 @@ func (c *Config) applyEnv() (int, error) {
 	envInt(&c.Run.TimeoutSeconds, "TIMEOUT_SECONDS", &n, &bad)
 	envBool(&c.Run.FailFast, "FAIL_FAST", &n, &bad)
 	envBool(&c.Run.DebugShowSecrets, "DEBUG_SHOW_SECRETS", &n, &bad)
+
+	envBool(&c.Run.Coverage.Enabled, "COVERAGE", &n, &bad)
+	envStr(&c.Run.Coverage.ControlURL, "COVERAGE_CONTROL_URL", &n)
+	envStr(&c.Run.Coverage.Dir, "COVERAGE_DIR", &n)
 
 	if len(bad) > 0 {
 		return n, fmt.Errorf("invalid environment override: %s", strings.Join(bad, "; "))
@@ -646,6 +690,31 @@ func (c *Config) defaults() {
 	if c.E2E.Spec == "" {
 		c.E2E.Spec = e2eSpecByProvider[c.Esignet.Provider]
 	}
+	if c.Run.Coverage.Dir == "" {
+		c.Run.Coverage.Dir = filepath.Join(c.Run.ReportDir, "covdata")
+	}
+	if c.Run.Coverage.ControlURL == "" {
+		// The coverage endpoints hang off the server root, while esignet.base_url
+		// almost always carries a /v1/esignet prefix — so derive the origin rather
+		// than reusing the URL. Only the local-instrumented-binary case is served
+		// by this default; anything fronted by a gateway that does not route
+		// /internal/* must set control_url explicitly.
+		c.Run.Coverage.ControlURL = originOf(c.Esignet.BaseURL)
+	}
+}
+
+// originOf reduces a URL to scheme://host, dropping any path. Returns "" for a
+// value that does not parse or has no host, which the caller reports as a
+// missing control_url rather than silently POSTing to a relative path.
+func originOf(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // validate enforces the supported scope: mock/mosip/sunbird with a static or dynamic OTP source.
@@ -656,6 +725,13 @@ func (c *Config) validate() error {
 		default:
 			return fmt.Errorf("unknown run.surfaces entry %q (want conformance|api|e2e)", s)
 		}
+	}
+
+	// A coverage run whose control URL could not be derived would skip every
+	// snapshot and still produce a report — one that reads as "0% covered"
+	// rather than "not measured". Reject it here instead.
+	if c.Run.Coverage.Enabled && c.Run.Coverage.ControlURL == "" {
+		return fmt.Errorf("run.coverage.enabled needs run.coverage.control_url (COVERAGE_CONTROL_URL): it could not be derived from esignet.base_url %q", c.Esignet.BaseURL)
 	}
 
 	for _, s := range c.Run.Surfaces {

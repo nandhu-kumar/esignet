@@ -42,6 +42,7 @@ done
 # --- defaults ----------------------------------------------------------------
 OUT_DIR=out
 if $WINDOWS; then BINARY=$OUT_DIR/esignet.exe; else BINARY=$OUT_DIR/esignet; fi
+if $WINDOWS; then COVER_BINARY=$OUT_DIR/esignet-cover.exe; else COVER_BINARY=$OUT_DIR/esignet-cover; fi
 CMD=./cmd/esignet
 : "${PORT:=8080}"
 # Backward compatibility: ISSUER_URL was renamed to MOSIP_ESIGNET_HOST.
@@ -83,6 +84,21 @@ target_build() { ## Compile production binary (out/esignet[.exe])
   mkdir -p "$OUT_DIR"
   CGO_ENABLED="$CGO_ENABLED" go build -trimpath -ldflags="-s -w" -o "$BINARY" "$CMD"
   echo "build: wrote $BINARY"
+}
+
+target_build_cover() { ## Compile coverage-instrumented binary for the api-test harness
+  need go
+  mkdir -p "$OUT_DIR"
+  # -coverpkg=./... keeps the denominator to this repo's own packages: the OIDC
+  # engine lives in the thunderid module and is not ours to be measured against.
+  # -covermode=atomic is required for runtime counter resets (see internal/covsnap)
+  # and for correctness under concurrent requests. -tags coverage adds the
+  # snapshot endpoints. No -ldflags="-s -w": stripping is pointless here and the
+  # symbols help when a coverage run needs debugging.
+  CGO_ENABLED="$CGO_ENABLED" go build -cover -covermode=atomic -coverpkg=./... -tags coverage \
+    -trimpath -o "$COVER_BINARY" "$CMD"
+  echo "build-cover: wrote $COVER_BINARY"
+  echo "run it with GOCOVERDIR=<dir> so snapshots have somewhere to land"
 }
 
 target_run() { ## Run with go run (development)
@@ -206,7 +222,7 @@ target_tidy() { ## Run go mod tidy
 }
 
 target_clean() { ## Remove build artefacts and coverage output
-  rm -f "$BINARY"
+  rm -f "$BINARY" "$COVER_BINARY"
   rm -rf bin/ "${OUT_DIR:?}/"
   rm -f coverage.out coverage.html
 }
@@ -228,6 +244,9 @@ Build
                      CGO_ENABLED=1 for real PKCS11/HSM support; default is a
                      static binary where PKCS11 stubs out to a startup error
                      and only PKCS12 works)
+  build-cover        Compile coverage-instrumented binary ($COVER_BINARY) for
+                     api-test: adds the /internal/coverage snapshot endpoints
+                     and counts statements across this module's own packages
 
 Run
   run                Run with go run (development)
@@ -268,6 +287,7 @@ for t in "${targets[@]}"; do
   case "$t" in
     help)            target_help ;;
     all|build)       target_build ;;
+    build-cover)     target_build_cover ;;
     run|dev)         target_run ;;
     test)            target_test ;;
     coverage)        target_coverage ;;

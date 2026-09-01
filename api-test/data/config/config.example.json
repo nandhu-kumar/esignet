@@ -214,6 +214,38 @@
       "The configuration panel and the suite plan config stay masked either way.",
       "Env override: DEBUG_SHOW_SECRETS=true"
     ],
-    "debug_show_secrets": false
+    "debug_show_secrets": false,
+
+    "//coverage": [
+      "Measures how much of esignet-service each surface exercises, and renders it",
+      "as a per-package panel in the report. OFF by default, and it must stay off",
+      "against an ordinary deployment: the endpoints it calls are compiled in only",
+      "by the `coverage` build tag, so a production binary answers 404 and the run",
+      "aborts.",
+      "",
+      "It needs an instrumented server you started yourself:",
+      "  cd ../esignet-service && ./make.sh build-cover",
+      "  GOCOVERDIR=<dir> out/esignet-cover",
+      "run-all.sh then resets the server's counters before each surface and",
+      "snapshots them after, so conformance, api and e2e each get an attributable",
+      "number alongside the union of all three.",
+      "",
+      "  enabled      turn the reset/snapshot calls on.        (env COVERAGE)",
+      "  control_url  origin serving /internal/coverage/* — the server ROOT, not",
+      "               esignet.base_url, which may carry a path prefix. Defaults to",
+      "               the origin of esignet.base_url.  (env COVERAGE_CONTROL_URL)",
+      "  dir          where snapshots land as THIS harness sees them; must resolve",
+      "               to the server's GOCOVERDIR. Defaults to <report_dir>/covdata.",
+      "                                                    (env COVERAGE_DIR)",
+      "",
+      "Collecting needs `go tool covdata` on PATH — the binary counter format has",
+      "no public reader — so a container image without the Go toolchain cannot do",
+      "it. run-all.sh checks that up front rather than after the run.",
+      "",
+      "Worked examples: data/config/config.cover.{mock,sunbird}.json"
+    ],
+    "coverage": {
+      "enabled": false
+    }
   }
 }

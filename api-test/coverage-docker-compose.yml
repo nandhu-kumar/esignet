@@ -1,0 +1,373 @@
+# api-test/coverage-docker-compose.yml — the whole coverage run in one command.
+#
+# Brings up everything the measurement needs, all on one compose network:
+#
+#   database              postgres for esignet's client/consent/key stores
+#   mock-identity-system  the mock plugin's identity backend
+#   esignet               COVERAGE-INSTRUMENTED build of ../esignet-service
+#   mongodb/server/httpd  the OpenID conformance suite
+#   harness               api-test, built with the Go toolchain so it can collect
+#
+# Usage:
+#   docker compose -f coverage-docker-compose.yml up --build \
+#     --abort-on-container-exit --exit-code-from harness
+#
+# The report and the raw counter snapshots land in ./out on the host.
+#
+# Why this is a separate file from docker-compose.yml: that one points the
+# harness at a DEPLOYED eSignet and never builds one. Here the server under test
+# is built from the sibling source tree with `-tags coverage`, which is the only
+# thing that compiles in the /internal/coverage endpoints the run drives. The two
+# cannot be the same file because the whole point of the normal one is that it
+# does not care where eSignet came from.
+#
+# Everything addresses eSignet as http://esignet:8088 — the compose service name.
+# That single spelling has to work from three places at once: the harness, the
+# conformance suite, and eSignet's own issuer claim. Discovery must be
+# self-consistent or the suite rejects it, which is why MOSIP_ESIGNET_HOST is the
+# same string rather than a localhost form.
+
+services:
+  database:
+    image: 'postgres:bookworm'
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - ../docker-compose/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  mock-identity-system:
+    image: 'mosipdev/mock-identity-system:release-0.14.x'
+    user: root
+    ports:
+      # Published so identities can be inspected and added by hand from the host
+      # (Postman, curl) while a run is up. Note 8082, not the 8081/9010 the image
+      # EXPOSEs — nothing listens on those, so a host-side call to 8081 fails as
+      # a connection refusal rather than as a 404 that would point at the port.
+      # eSignet reaches this service as mock-identity-system:8082 on the compose
+      # network and does not depend on this mapping.
+      - "8082:8082"
+    environment:
+      - container_user=mosip
+      - active_profile_env=default,local
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://database:5432/mosip_mockidentitysystem?currentSchema=mockidentitysystem
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - MOSIP_ESIGNET_HOST=esignet:8088
+    # !! Recreating this container breaks it, and the failure is not obvious.
+    #
+    # It generates its PKCS12 keystore on first boot at the RELATIVE path
+    # mosip.kernel.keymanager.hsm.config-path=mock_local.p12 — i.e. into the
+    # container's own writable layer — while the aliases naming those keys are
+    # rows in postgres, which outlives the container. Recreate the container and
+    # you pair an empty keystore with live aliases; startup then dies with
+    #
+    #   NoSuchSecurityProviderException: KER-KMA-004 --> No such alias: <uuid>
+    #
+    # and every dependent service waits on a container that will never be ready.
+    #
+    # Recovery (the seeded identities are in mock_identity and are NOT affected):
+    #   docker compose -f coverage-docker-compose.yml exec -T database     #     psql -U postgres -d mosip_mockidentitysystem     #     -c "delete from mockidentitysystem.key_alias; delete from mockidentitysystem.key_store;"
+    #   docker compose -f coverage-docker-compose.yml up -d mock-identity-system
+    #
+    # A named volume does NOT fix this: the path is relative to the working
+    # directory, which also holds the jar and start script, so it cannot be
+    # mounted over. Treat any edit to this service as requiring the reset above.
+    depends_on:
+      database:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  # Loads the identity the mock config authenticates as. A deployed environment
+  # already has identities; a container from the published image has none, so
+  # without this every e2e login fails with invalid_individual_id and the
+  # coverage panel reports the flow packages as barely reached — a statement
+  # about the fixture, not about the service.
+  #
+  # Runs to completion and exits, so `up` will show it as exited 0. It is
+  # idempotent enough to re-run: a second create for an existing individualId is
+  # reported and ignored rather than being allowed to fail the run.
+  seed-identity:
+    image: 'curlimages/curl:8.11.1'
+    depends_on:
+      mock-identity-system:
+        condition: service_started
+    volumes:
+      - ./data/seed:/seed:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        base=http://mock-identity-system:8082/v1/mock-identity-system
+        echo "seed: waiting for mock-identity-system"
+        i=0
+        # No healthcheck on that image, so poll the endpoint the seed will use.
+        # A known-absent id answering with invalid_individual_id proves the app
+        # is up and serving, which a plain TCP connect does not.
+        until curl -sf -o /dev/null "$$base/identity/0000000000" \
+           || curl -s "$$base/identity/0000000000" | grep -q invalid_individual_id; do
+          i=$$((i+1))
+          [ "$$i" -ge 90 ] && { echo "seed: mock-identity-system never came up" >&2; exit 1; }
+          sleep 2
+        done
+        # Each file holds ONLY the identity object; the envelope is built here.
+        # requestTime is validated against the service's clock, so it cannot be
+        # a committed value — it would work once and fail from then on. The
+        # endpoint also rejects unknown top-level fields, which is why the seed
+        # files carry no _comment key (see data/seed/README.md).
+        rt=$$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+        for f in /seed/*.json; do
+          echo "seed: $$f"
+          body='{"requestTime":"'"$$rt"'","request":'$$(cat "$$f")'}'
+          out=$$(printf '%s' "$$body" | curl -s -X POST -H 'Content-Type: application/json' -d @- "$$base/identity")
+          echo "seed: $$out"
+          # duplicate_individual_id means a previous run already seeded it, which
+          # is exactly the state we want — the stack is routinely brought up
+          # against an existing database volume. Anything else must fail loudly
+          # here rather than leave the run to discover it as a wall of failed
+          # logins that reads like a service regression.
+          case "$$out" in
+            *successfully*|*duplicate_individual_id*) ;;
+            *) echo "seed: failed" >&2; exit 1 ;;
+          esac
+        done
+        echo "seed: done"
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  # Registers the conformance suite's static clients on THIS server, and writes
+  # <plan>.local.json copies whose discoveryUrl points here. The suite
+  # authenticates as clients that exist only on whichever deployment the private
+  # plan configs were written for, so without this every conformance module fails
+  # at client authentication and that column reads ~0%.
+  #
+  # Needs conformance-suite-private mounted READ-WRITE, unlike everywhere else:
+  # it writes the .local.json copies there. It never modifies the originals.
+  seed-conformance:
+    image: 'python:3.13-slim'
+    depends_on:
+      esignet:
+        condition: service_started
+    environment:
+      - ESIGNET_BASE_URL=http://esignet:8088
+      - SUITE_BASE_URL=${CONFORMANCE_BASE_URL:-https://localhost.emobix.co.uk:8443}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-local-no-scope}
+      - PLAN_CONFIG_DIR=/conformance-suite-private
+    volumes:
+      - ./data/seed:/seed:ro
+      - ./conformance-suite-private:/conformance-suite-private
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "conformance clients: waiting for esignet"
+        i=0
+        until python3 -c "import urllib.request,sys; urllib.request.urlopen('http://esignet:8088/health',timeout=2)" 2>/dev/null; do
+          i=$$((i+1))
+          [ "$$i" -ge 90 ] && { echo "esignet never came up" >&2; exit 1; }
+          sleep 2
+        done
+        exec python3 /seed/conformance-clients.py
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  esignet:
+    # !! Recreating this container breaks it, the same way mock-identity-system
+    # does above — any change here (switching ESIGNET_PROVIDER, an env edit, a
+    # rebuild) needs the same reset afterward.
+    #
+    # KEYMANAGER_PKCS12_FILE_PATH=/home/mosip/test.pfx is generated on first boot
+    # into the container's own writable layer, not a mounted volume, while the
+    # key aliases naming those keys (ROOT/OIDC_SERVICE/OIDC_PARTNER) are rows in
+    # `esignet` schema tables in postgres, which outlives the container. Recreate
+    # the container and you pair an empty keystore with live aliases; startup
+    # then dies with:
+    #
+    #   failed to provision key hierarchy: provision ROOT key: pkcs12:
+    #   certificate alias "<uuid>" not found
+    #
+    # Recovery (registered clients live in client_detail/public_key_registry, a
+    # different table, and are NOT affected):
+    #   docker compose -f coverage-docker-compose.yml exec -T database \
+    #     psql -U postgres -d mosip_esignet \
+    #     -c "delete from esignet.key_alias; delete from esignet.key_store;"
+    #   docker compose -f coverage-docker-compose.yml up -d esignet
+    build:
+      context: ../esignet-service
+      args:
+        # The one line that makes this a coverage run. Without it the image is an
+        # ordinary build and every /internal/coverage call 404s, which run-all.sh
+        # catches in its preflight rather than after the surfaces have run.
+        BUILD_COVER: "1"
+    user: root
+    ports:
+      # Published so you can curl the server, and read /internal/coverage/* by
+      # hand, while a run is in progress. The harness and the suite reach it by
+      # service name on the network instead.
+      - "8088:8088"
+    environment:
+      - container_user=mosip
+      - PORT=8088
+      # Issuer, and therefore what discovery advertises. Must be the address the
+      # suite and the harness also use, or the suite rejects the metadata as
+      # inconsistent with where it fetched it from.
+      - MOSIP_ESIGNET_HOST=http://esignet:8088
+      - DATABASE_HOST=database
+      - DATABASE_PORT=5432
+      - DATABASE_USERNAME=postgres
+      - DATABASE_PASSWORD=postgres
+      - KEYMANAGER_KEYSTORE_TYPE=PKCS12
+      - KEYMANAGER_DB_SCHEMA=esignet
+      - KEYMANAGER_PKCS12_FILE_PATH=/home/mosip/test.pfx
+      - KEYMANAGER_PKCS12_PASSWORD=localtest
+      - KEYMANAGER_PKCS12_ALLOW_INSECURE_SOFTWARE_KEYSTORE=true
+      - MOSIP_ESIGNET_CACHE_TYPE=inmemory
+      # ESIGNET_PROVIDER selects the plugin (default mock); set
+      # ESIGNET_PROVIDER=sunbird to switch. mock-only and sunbird-only settings
+      # below are both always present — each is a no-op when the other plugin is
+      # selected, so one compose file serves both without duplicating services.
+      # Switching this recreates the container — see the keystore/key_alias
+      # warning above this service's `build:` block, and reset before trusting
+      # the run that follows a switch.
+      - MOSIP_ESIGNET_AUTHN_PROVIDER=${ESIGNET_PROVIDER:-mock}
+      - MOSIP_ESIGNET_MOCK_DOMAIN_URL=http://mock-identity-system:8082
+      # Sunbird registry endpoints. Public HTTPS (no VPN/cluster access needed),
+      # same released registry esignet-service/.env.example documents and the
+      # esqa-sunbird deployment profile's identity (INDIVIDUAL_ID/KBI_* in
+      # config.cover.sunbird.json) was captured against. Read only when
+      # ESIGNET_PROVIDER=sunbird — sunbird.Config.Validate() is gated on the
+      # provider actually being selected (esignet-service/internal/engine/sunbird/config.go),
+      # so these are inert while the mock plugin runs.
+      - MOSIP_ESIGNET_AUTHENTICATOR_SUNBIRD_RC_AUTH_FACTOR_KBI_REGISTRY_SEARCH_URL=https://registry.released.mosip.net/api/v1/Insurance/search
+      - MOSIP_ESIGNET_AUTHENTICATOR_SUNBIRD_RC_REGISTRY_GET_URL=https://registry.released.mosip.net/api/v1/Insurance/
+      - MOSIP_ESIGNET_CAPTCHA_SITE_PROVIDER=hcaptcha
+      - MOSIP_ESIGNET_CAPTCHA_SITE_KEY=10000000-ffff-ffff-ffff-000000000001
+      # Where the instrumented binary writes counter snapshots. Same path the
+      # harness reads them from, via the shared ./out mount below.
+      - GOCOVERDIR=/app/out/covdata
+    volumes:
+      - ./out:/app/out
+    depends_on:
+      database:
+        condition: service_healthy
+      mock-identity-system:
+        condition: service_started
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  mongodb:
+    image: ${MONGODB_IMAGE:-mongo:6.0.13}
+    volumes:
+      - suite-mongodb-data:/data/db
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  server:
+    image: registry.gitlab.com/openid/conformance-suite:${SUITE_IMAGE_TAG:-release-v5.1.42}
+    depends_on:
+      - mongodb
+    environment:
+      BASE_URL: https://localhost.emobix.co.uk:8443
+      MONGODB_HOST: mongodb
+      SPRING_PROFILES_ACTIVE: ${SUITE_SPRING_PROFILE:-dev}
+      SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GITLAB_CLIENTID: unused
+      SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GITLAB_CLIENTSECRET: unused
+      SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENTID: unused
+      SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GOOGLE_CLIENTSECRET: unused
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  httpd:
+    image: registry.gitlab.com/openid/conformance-suite/nginx:${SUITE_IMAGE_TAG:-release-v5.1.42}
+    depends_on:
+      - server
+    ports:
+      - "8443:8443"
+    networks:
+      default:
+        aliases:
+          - localhost.emobix.co.uk
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+  harness:
+    build:
+      context: .
+      # The Go-carrying variant. `go tool covdata` is the only reader for the
+      # binary counter format, so the slim runtime image cannot collect.
+      target: coverage
+    depends_on:
+      httpd:
+        condition: service_started
+      esignet:
+        condition: service_started
+      # Gate on the seed actually finishing. Starting the surfaces against an
+      # unseeded identity store produces a full run of failed logins that looks
+      # like a service regression.
+      seed-identity:
+        condition: service_completed_successfully
+      # Same reasoning: without the suite's static clients registered here, every
+      # conformance module fails at client authentication.
+      seed-conformance:
+        condition: service_completed_successfully
+    command: ["-c", "/app/config.json"]
+    environment:
+      # A locally started server installs no scope middleware (that needs both
+      # ISSUER_URL and JWKS_URL), so it never inspects this bearer — but the
+      # client-mgmt scenarios still need to present one, and without it they are
+      # gated out as ENV_NOT_READY and internal/clientmgmt reads near zero. An
+      # explicit opt-in, so a real deployment cannot go green on a broken IAM.
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-local-no-scope}
+      - CONFORMANCE_BASE_URL=${CONFORMANCE_BASE_URL:-https://localhost.emobix.co.uk:8443}
+      - CONFORMANCE_TLS_VERIFY=${CONFORMANCE_TLS_VERIFY:-false}
+      - SUITE_WAIT_SECONDS=${SUITE_WAIT_SECONDS:-150}
+      # Suppresses the default overlay. config.local.json normally points
+      # esignet.base_url at a deployed environment and is applied on top of
+      # whichever config is selected — which would drive that deployment while
+      # snapshotting the local binary's counters, and report a measurement of a
+      # server nothing touched. Not mounted here at all, but CONFIG_LOCAL is set
+      # so an image that ships one cannot pick it up either.
+      - CONFIG_LOCAL=/app/data/config/overlay.none.json
+      # SURFACES and TEST_PROFILE are deliberately NOT declared here. The config
+      # decides what runs; to narrow one run, pass run-all.sh's own flag:
+      #
+      #   docker compose -f coverage-docker-compose.yml run --rm harness \
+      #     -c /app/config.json -s api,e2e
+      #
+      # Declaring them as `NAME=${VAR:-}` would export them EMPTY on every run,
+      # and config.applyEnv overrides on presence (LookupEnv), so an empty
+      # SURFACES blanks the config's selection and the run does nothing while
+      # still consolidating to a green report.
+    volumes:
+      # Shared with esignet: the report, and out/covdata where the snapshots land.
+      - ./out:/app/out
+      # COVER_CONFIG_FILE, not CONFIG_FILE: compose auto-loads ./.env for
+      # interpolation, and that file already sets CONFIG_FILE for the ordinary
+      # run (a deployed target). Reusing the name here would silently mount that
+      # config instead of a cover one — the run then drives the deployment while
+      # snapshotting this server's counters. A distinct name means the ordinary
+      # .env cannot reach into a coverage run at all.
+      - ./${COVER_CONFIG_FILE:-data/config/config.cover.mock.json}:/app/config.json:ro
+      - ./conformance-suite-private:/app/conformance-suite-private:ro
+    logging:
+      driver: json-file
+      options: { max-size: "500k", max-file: "5" }
+
+volumes:
+  suite-mongodb-data:

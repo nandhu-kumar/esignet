@@ -48,6 +48,7 @@ esignet-service/
 | Command | Output | Notes |
 |---------|--------|--------|
 | `./make.sh build` | `out/esignet.exe` (Windows), `out/esignet` (Linux) | Production binary. |
+| `./make.sh build-cover` | `out/esignet-cover[.exe]` | Coverage-instrumented binary for the api-test harness. Adds the `coverage` build tag. |
 | `./make.sh test` | — | Unit tests with race detector. |
 | `./make.sh coverage` | `coverage.out` | Coverage profile + per-package summary. |
 | `./make.sh coverage-html` | `coverage.html` | Opens full HTML report. |
@@ -413,6 +414,29 @@ All runtime state is namespaced under `REDIS_KEY_PREFIX` (default `esignet:`):
 ```
 
 Unit tests use `miniredis` for Redis (no running Redis required) and mock queriers for the Postgres layer. Keymanager tests provision their own keys against a mock querier/keystore, no local `keys/signing.key`/`signing.crt` or running Postgres required.
+
+### Coverage from the API test harness
+
+The three `api-test` surfaces (conformance, api, e2e) are black-box — they only
+speak HTTP — so unit-test coverage says nothing about what they reach. To measure
+that, build an instrumented binary and let the harness snapshot its counters
+between surfaces:
+
+```bash
+./make.sh build-cover                                        # out/esignet-cover[.exe]
+GOCOVERDIR=$PWD/../api-test/out/covdata ./out/esignet-cover
+```
+
+Then run the harness with `run.coverage.enabled` (or `COVERAGE=true`); it resets
+the counters before each surface and snapshots after, so the report attributes
+coverage to the surface that earned it. See
+[api-test/README.md](../api-test/README.md#coverage-of-esignet-service).
+
+`build-cover` sets `-covermode=atomic -coverpkg=./...` and the `coverage` build
+tag, which is the only thing that compiles in `internal/covsnap`'s
+`POST /internal/coverage/{reset,snapshot}` endpoints. `./make.sh build` and the
+production `Dockerfile` do not set that tag, so a shipped binary has no such
+routes.
 
 ## Health check
 

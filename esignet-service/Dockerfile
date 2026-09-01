@@ -5,7 +5,24 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
-RUN mkdir -p /out && go build -trimpath -ldflags="-s -w" -o /out/esignet.exe ./cmd/esignet
+
+# BUILD_COVER=1 produces the coverage-instrumented binary the api-test harness
+# measures against — the same thing ./make.sh build-cover builds, so the flags
+# are kept identical: -covermode=atomic is required for the runtime counter
+# resets (internal/covsnap), -coverpkg=./... keeps the denominator to this
+# module's own packages, and -tags coverage is the ONLY thing that compiles in
+# the POST /internal/coverage/{reset,snapshot} endpoints. Default 0, so an
+# ordinary `docker build` — and every published image — carries no such routes.
+# No -ldflags="-s -w" under coverage: stripping buys nothing there and the
+# symbols help when a coverage run needs debugging.
+ARG BUILD_COVER=0
+RUN mkdir -p /out && \
+    if [ "$BUILD_COVER" = "1" ]; then \
+      go build -cover -covermode=atomic -coverpkg=./... -tags coverage \
+        -trimpath -o /out/esignet.exe ./cmd/esignet; \
+    else \
+      go build -trimpath -ldflags="-s -w" -o /out/esignet.exe ./cmd/esignet; \
+    fi
 
 FROM debian:bookworm-slim
 
@@ -59,6 +76,7 @@ RUN apt-get -y update \
 && groupadd -g ${container_user_gid} ${container_user_group} \
 && useradd -u ${container_user_uid} -g ${container_user_group} -s /bin/sh -m ${container_user} \
 && echo "${container_user} ALL=(ALL) NOPASSWD:/home/${container_user}/${hsm_local_dir}/install.sh" >> /etc/sudoers \
+&& sed -i 's/\r$//' /home/${container_user}/entrypoint.sh \
 && chmod +x /home/${container_user}/entrypoint.sh \
 && chown -R ${container_user}:${container_user_group} /home/${container_user} /home/${container_user}/data \
 && rm -rf /var/lib/apt/lists/*

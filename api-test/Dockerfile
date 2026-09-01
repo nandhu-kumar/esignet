@@ -33,7 +33,8 @@ RUN mkdir -p /out/bin && \
     go build -trimpath -ldflags="-s -w" -o /out/bin/conformance ./cmd/conformance && \
     go build -trimpath -ldflags="-s -w" -o /out/bin/e2e ./cmd/e2e && \
     go build -trimpath -ldflags="-s -w" -o /out/bin/consolidate ./cmd/consolidate && \
-    go build -trimpath -ldflags="-s -w" -o /out/bin/cfg ./cmd/cfg
+    go build -trimpath -ldflags="-s -w" -o /out/bin/cfg ./cmd/cfg && \
+    go build -trimpath -ldflags="-s -w" -o /out/bin/covreport ./cmd/covreport
 
 # Same stage, second module: `go test -c` produces a standalone godog binary
 # so the runtime image needs no Go toolchain. Both modules emit into /out/bin.
@@ -65,12 +66,57 @@ COPY --from=builder /out/bin/ ./bin/
 # a mounted config.local.json, both of which override these.
 COPY data ./data
 COPY run-all.sh ./
-RUN chmod +x run-all.sh && mkdir -p out && chown -R apitest:apitest /app
+# A Windows checkout leaves CRLF line endings, which make the shebang line
+# unresolvable — the container then exits with a bare "no such file or
+# directory" naming a script that plainly exists. Normalising here keeps the
+# image buildable from any checkout; a repo-wide .gitattributes would be the
+# permanent fix.
+RUN sed -i 's/\r$//' run-all.sh && chmod +x run-all.sh && mkdir -p out && chown -R apitest:apitest /app
 
 ENV BIN_DIR=/app/bin
 # The prebuilt api.test runs from /app rather than from the module directory it
 # was compiled in, so point it at the features tree explicitly.
 ENV API_FEATURES_DIR=/app/data/features
+USER apitest:apitest
+
+ENTRYPOINT ["./run-all.sh"]
+
+# --- coverage variant ---------------------------------------------------------
+# Same harness, on a base that carries the Go toolchain. Collecting coverage
+# means reading the binary counter files an instrumented server writes, and that
+# format has no public reader — `go tool covdata` is the only way in. The slim
+# runtime above deliberately has no Go, so a coverage run there fails the
+# preflight in run-all.sh by design.
+#
+# This target is for local coverage runs only and is never published: it is an
+# order of magnitude larger than the slim image, and it exists to answer "what
+# did the surfaces reach", not to run tests in CI.
+#
+#   docker build --target coverage -t apitest-esignet:coverage .
+FROM golang:1.26-bookworm AS coverage
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -g 1001 apitest && useradd -u 1001 -g apitest -m -s /usr/sbin/nologin apitest
+
+WORKDIR /app
+COPY --from=builder /out/bin/ ./bin/
+COPY data ./data
+COPY run-all.sh ./
+# A Windows checkout leaves CRLF line endings, which make the shebang line
+# unresolvable — the container then exits with a bare "no such file or
+# directory" naming a script that plainly exists. Normalising here keeps the
+# image buildable from any checkout; a repo-wide .gitattributes would be the
+# permanent fix.
+RUN sed -i 's/\r$//' run-all.sh && chmod +x run-all.sh && mkdir -p out && chown -R apitest:apitest /app
+
+ENV BIN_DIR=/app/bin
+ENV API_FEATURES_DIR=/app/data/features
+# `go tool covdata` writes to the build cache; the apitest user needs a HOME it
+# owns or the collection step fails with a permission error deep inside the
+# toolchain rather than anywhere that names the cause.
+ENV HOME=/home/apitest
+ENV GOCACHE=/home/apitest/.cache/go-build
 USER apitest:apitest
 
 ENTRYPOINT ["./run-all.sh"]

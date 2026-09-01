@@ -27,6 +27,7 @@ import (
 	"github.com/mosip/esignet/internal/clientmgmt"
 	"github.com/mosip/esignet/internal/config"
 	"github.com/mosip/esignet/internal/consentmgmt"
+	"github.com/mosip/esignet/internal/covsnap"
 	"github.com/mosip/esignet/internal/engine"
 	"github.com/mosip/esignet/internal/engine/executors"
 	"github.com/mosip/esignet/internal/engine/runtimestores"
@@ -96,6 +97,10 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	// Coverage-counter control for the api-test harness. Compiled in only under
+	// the `coverage` build tag (./make.sh build-cover); a no-op otherwise.
+	covsnap.Register(mux, logger)
 
 	commonHTTPClient := config.NewHTTPClient(appCfg.OutboundHTTPClient)
 

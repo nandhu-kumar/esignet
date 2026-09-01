@@ -38,6 +38,15 @@
 #                           /api/runner/available before the conformance surface
 #                           runs (default: 90; 0 disables the wait)
 #
+#   Coverage of esignet-service (run.coverage in the config, off by default):
+#     each surface is bracketed by a counter reset + snapshot, so the report
+#     shows what conformance covered as distinct from api and e2e, plus the
+#     union. Requires the server under test to be a coverage build:
+#
+#       cd ../esignet-service && ./make.sh build-cover
+#       GOCOVERDIR=$PWD/../api-test/out/covdata out/esignet-cover
+#       cd ../api-test && ./run-all.sh -c data/config/config.cover.json
+#
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
@@ -80,6 +89,7 @@ if [[ -n "$BIN_DIR" ]]; then
   run_e2e()         { "$BIN_DIR/e2e" "$@"; }
   run_consolidate() { "$BIN_DIR/consolidate" "$@"; }
   run_cfg()         { "$BIN_DIR/cfg" "$@"; }
+  run_coverage()    { "$BIN_DIR/covreport" "$@"; }
   # Runs from the harness root, not from api/: the prebuilt binary carries no
   # module directory with it, so the image points API_FEATURES_DIR at the
   # features tree instead.
@@ -89,13 +99,17 @@ else
   run_e2e()         { go run ./cmd/e2e "$@"; }
   run_consolidate() { go run ./cmd/consolidate "$@"; }
   run_cfg()         { go run ./cmd/cfg "$@"; }
+  run_coverage()    { go run ./cmd/covreport "$@"; }
   # -count=1 defeats Go's test cache. These are integration tests against a live
   # eSignet, so their outcome depends on that server, not on the Go sources the
   # cache keys off. Without it a second run with unchanged sources prints
   # "ok (cached)" without executing a single scenario, writes no envelope, and
   # fails the run with "api surface produced no envelope" — a message that points
-  # at a missing file rather than at the cache. The BIN_DIR branch above needs no
-  # such flag: it runs the prebuilt api.test binary, which is not cached.
+  # at a missing file rather than at the cache. In a coverage run it is worse
+  # still: the surface is bracketed but never executes, so the api column reads
+  # ~0% — indistinguishable from a surface that ran and covered nothing. The
+  # BIN_DIR branch above needs no such flag: it runs the prebuilt api.test
+  # binary, which is not cached.
   run_api()         { ( cd api && go test ./... -run TestFeatures -count=1 ); }
 fi
 
@@ -186,6 +200,74 @@ wait_for_suite() {
   done
 }
 
+# --- coverage -----------------------------------------------------------------
+# When run.coverage.enabled is on, each surface is bracketed by a counter reset
+# and a snapshot against a coverage-instrumented esignet-service, so the report
+# can say what conformance covered as distinct from what api or e2e covered. The
+# server must have been built with `esignet-service/make.sh build-cover` and
+# started with GOCOVERDIR=$COVERAGE_DIR; against an ordinary deployment the
+# endpoints do not exist and the run must be left with coverage off.
+COVERAGE="${COVERAGE:-false}"
+coverage_failed=0
+
+cov_call() {
+  local path="$1" label="$2" url
+  url="${COVERAGE_CONTROL_URL%/}/internal/coverage/$path"
+  [[ -n "$label" ]] && url="$url?label=$label"
+  # -f so an HTTP error is a failure, not a 200-shaped body we would ignore.
+  if ! curl -skf -o /dev/null --max-time 10 -X POST "$url"; then
+    echo "coverage: POST $url failed — is this a build-cover server with GOCOVERDIR set?" >&2
+    coverage_failed=1
+    return 1
+  fi
+  return 0
+}
+
+# cov_begin/cov_end bracket one surface. Snapshot labels are <plugin>__<surface>,
+# which is the layout cmd/covreport reads back — plugin included so several
+# plugins' runs can share one COVERAGE_DIR without overwriting each other.
+cov_begin() {
+  [[ "$COVERAGE" == "true" ]] || return 0
+  cov_call reset ""
+}
+cov_end() {
+  [[ "$COVERAGE" == "true" ]] || return 0
+  cov_call snapshot "${PLUGIN}__${1}"
+}
+
+if [[ "$COVERAGE" == "true" ]]; then
+  echo "== coverage: on — control=$COVERAGE_CONTROL_URL dir=$COVERAGE_DIR =="
+  # Clear THIS plugin's snapshot directories, for the same reason the envelopes
+  # are cleared above: cmd/covreport reports whatever <plugin>__* directories it
+  # finds, so a surface left out of this run would otherwise contribute its
+  # previous run's counters as a column of this one — stale coverage presented as
+  # current, and against a since-rebuilt server the two are not even measuring
+  # the same binary. Other plugins' directories are left alone; they are keyed by
+  # plugin precisely so several can share one COVERAGE_DIR.
+  if [[ -d "$COVERAGE_DIR" ]]; then
+    rm -rf "${COVERAGE_DIR:?}/${PLUGIN}__"* 2>/dev/null || true
+  fi
+  # Preflight, not post-flight. Reading the binary counter format needs `go tool
+  # covdata` (the format has no public reader), which the runtime container
+  # image deliberately does not carry — and discovering that only after every
+  # surface has run would waste the whole run. Checked here so the failure
+  # arrives in seconds.
+  if ! command -v go >/dev/null 2>&1; then
+    echo "coverage needs the Go toolchain on PATH (\`go tool covdata\`), which this environment does not have." >&2
+    echo "Run the harness from source with coverage, or leave run.coverage.enabled off." >&2
+    exit 2
+  fi
+  # The snapshot endpoints are compiled in only by the `coverage` build tag, so
+  # an ordinary server answers 404 here. Failing now names the real problem
+  # instead of surfacing it as three failed snapshots later.
+  if ! curl -skf -o /dev/null --max-time 10 -X POST "${COVERAGE_CONTROL_URL%/}/internal/coverage/reset"; then
+    echo "coverage: $COVERAGE_CONTROL_URL has no /internal/coverage endpoints." >&2
+    echo "Start the server from a coverage build: (cd ../esignet-service && ./make.sh build-cover) then" >&2
+    echo "run it with GOCOVERDIR pointing at the same directory as run.coverage.dir ($COVERAGE_DIR)." >&2
+    exit 2
+  fi
+fi
+
 echo "== api-test: plugin=$PLUGIN surfaces=$SURFACES config=$CONFIG =="
 
 # A surface that dies before writing its envelope (build error, panic, missing
@@ -196,9 +278,11 @@ conf_json=""
 if [[ ",$SURFACES," == *",conformance,"* ]]; then
   echo "-- conformance surface --"
   wait_for_suite
+  cov_begin
   # Capture stdout to learn the report path; the orchestrator exits non-zero on
   # failures, which is fine here — we still want to consolidate what it produced.
   conf_out="$(run_conformance -config "$CONFIG")" || echo "(conformance run reported failures)"
+  cov_end conformance
   printf '%s\n' "$conf_out"
   conf_html="$(printf '%s\n' "$conf_out" | sed -n 's/^report: //p' | tail -1)"
   [[ -n "$conf_html" ]] && conf_json="${conf_html%.html}.json"
@@ -216,16 +300,35 @@ if [[ ",$SURFACES," == *",api,"* ]]; then
     echo "esignet.base_url (MOSIP_ESIGNET_BASE_URL) is required for the api surfaces" >&2
     exit 2
   fi
+  cov_begin
   run_api || { echo "(api reported scenario failures)"; surface_failed=1; }
+  cov_end api
 fi
 
 if [[ ",$SURFACES," == *",e2e,"* ]]; then
   echo "-- e2e surface (create client -> login -> token -> userinfo claims) --"
+  cov_begin
   run_e2e -config "$CONFIG" -out "$OUT_DIR/e2e-envelope.json" || { echo "(e2e reported scenario failures)"; surface_failed=1; }
+  cov_end e2e
+fi
+
+# Turn the raw per-surface counter dumps into the percentages the report shows.
+# Runs even if a surface failed: partial coverage of a broken run is still the
+# honest picture, and suppressing it would hide which surface stopped early.
+cov_json=""
+if [[ "$COVERAGE" == "true" ]]; then
+  echo "-- coverage --"
+  if run_coverage -covdir "$COVERAGE_DIR" -plugin "$PLUGIN" -out "$OUT_DIR"; then
+    cov_json="$OUT_DIR/coverage.json"
+  else
+    echo "coverage collection failed (see above)" >&2
+    coverage_failed=1
+  fi
 fi
 
 echo "-- consolidate --"
 args=(-plugin "$PLUGIN" -out "$OUT_DIR")
+[[ -n "$cov_json" ]] && args+=(-coverage "$cov_json")
 # consolidate has no config of its own; forward the resolved debug flag so the
 # consolidated report redacts exactly like the per-surface ones.
 [[ "${DEBUG_SHOW_SECRETS:-false}" == "true" ]] && args+=(-show-secrets)
@@ -248,6 +351,12 @@ consolidate_rc=$?
 
 if (( surface_failed )); then
   echo "one or more surfaces failed to run to completion — see above" >&2
+  exit 1
+fi
+# Coverage was explicitly asked for, so a report without it is not the run that
+# was requested — same reasoning as a missing surface envelope above.
+if (( coverage_failed )); then
+  echo "coverage was enabled but could not be collected — see above" >&2
   exit 1
 fi
 exit "$consolidate_rc"

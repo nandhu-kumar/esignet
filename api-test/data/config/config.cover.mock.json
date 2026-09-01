@@ -1,0 +1,109 @@
+{
+  "_comment": [
+    "mock plugin, run against a coverage-instrumented esignet-service so the",
+    "report carries the per-surface coverage panel.",
+    "",
+    "Same test selection as config.mock.json; the difference is where it points",
+    "and that run.coverage is on. Run the whole thing with compose, which builds",
+    "the instrumented server and brings up its dependencies and the suite:",
+    "",
+    "  docker compose -f coverage-docker-compose.yml up --build \\",
+    "    --abort-on-container-exit --exit-code-from harness",
+    "",
+    "'esignet' is the compose service name. That one spelling has to work from",
+    "three places at once -- the harness, the conformance suite, and the server's",
+    "own issuer claim -- because discovery has to be self-consistent or the suite",
+    "rejects it. Do not change it to localhost: the suite would then resolve it to",
+    "its own container.",
+    "",
+    "The compose file sets two things this config cannot: ADMIN_TOKEN, because a",
+    "server started without ISSUER_URL and JWKS_URL installs no scope middleware",
+    "and never inspects the bearer (an explicit opt-in, so a real deployment",
+    "cannot go green on a broken IAM -- see api/steps.go); and CONFIG_LOCAL",
+    "pointing at overlay.none.json, because config.local.json normally aims",
+    "esignet.base_url at a deployed environment and is applied on top of this",
+    "file, which would drive that deployment while snapshotting the local",
+    "binary's counters.",
+    "",
+    "The conformance surface additionally needs conformance-suite-private/*.json",
+    "to carry a discoveryUrl on http://esignet:8088 and clients registered on THIS",
+    "server -- the tracked copies point at a deployed environment. Without that,",
+    "select SURFACES=api,e2e.",
+    "",
+    "run.coverage.dir is the harness's view of the snapshot directory and must",
+    "resolve to the same place as the server's GOCOVERDIR; compose does that with",
+    "a shared ./out mount."
+  ],
+  "conformance": {
+    "base_url": "https://localhost.emobix.co.uk:8443",
+    "tls_verify": false
+  },
+  "plans": [
+    {
+      "name": "oidcc-test-plan",
+      "variant": {
+        "client_auth_type": "private_key_jwt",
+        "response_type": "code",
+        "response_mode": "default",
+        "client_registration": "static_client"
+      },
+      "config_file": "conformance-suite-private/esignet-config.local.json"
+    },
+    {
+      "name": "fapi2-security-profile-final-test-plan",
+      "variant": {
+        "client_auth_type": "private_key_jwt",
+        "sender_constrain": "dpop",
+        "authorization_request_type": "simple",
+        "openid": "openid_connect",
+        "fapi_profile": "plain_fapi"
+      },
+      "config_file": "conformance-suite-private/esignet-fapi2-config.local.json",
+      "profile": "full"
+    }
+  ],
+  "keycloak": {
+    "client_id": "mosip-pms-client"
+  },
+  "esignet": {
+    "base_url": "http://esignet:8088",
+    "provider": "mock",
+    "auth_factor": "otp",
+    "identity": {
+      "individual_id": "8267411574",
+      "id_type": "phone"
+    },
+    "credentials": {
+      "username": "decl-user-1",
+      "password": "Mosip@123"
+    },
+    "otp": {
+      "source": "static",
+      "value": "111111"
+    }
+  },
+  "api": {
+    "tags": "",
+    "flow_client_id": "Test-postman-client-199"
+  },
+  "e2e": {
+    "spec": "data/scenarios/e2e-scenarios.json",
+    "auth_factors": [],
+    "include": [],
+    "exclude": []
+  },
+  "run": {
+    "surfaces": [
+      "conformance",
+      "api",
+      "e2e"
+    ],
+    "profile": "full",
+    "debug_show_secrets": true,
+    "coverage": {
+      "enabled": true,
+      "control_url": "http://esignet:8088",
+      "dir": "out/covdata"
+    }
+  }
+}

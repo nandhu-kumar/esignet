@@ -353,6 +353,50 @@ To debug a failure a redacted trace cannot explain, set `run.debug_show_secrets:
 `DEBUG_SHOW_SECRETS=true`) for a local run. The report then carries a red banner saying so. Never
 leave it on for anything CI archives.
 
+### Coverage of esignet-service
+
+A run can also measure how much of the service under test each surface exercised, and render it as
+a per-package panel in the same report: one column per surface, plus their union.
+
+This needs a **coverage build of the server, started by you** — the counter endpoints are compiled
+in only under the `coverage` build tag, so an ordinary deployment answers 404 and the run aborts
+rather than reporting a measurement that did not happen.
+
+```bash
+cd ../esignet-service && ./make.sh build-cover
+MOSIP_ESIGNET_HOST=http://host.docker.internal:8088 PORT=8088 \
+  GOCOVERDIR=$PWD/../api-test/out/covdata out/esignet-cover
+
+cd ../api-test
+CONFIG_LOCAL=data/config/overlay.none.json ADMIN_TOKEN=local-no-scope \
+  ./run-all.sh -c data/config/config.cover.mock.json
+```
+
+`run-all.sh` resets the server's counters before each surface and snapshots them after, so
+conformance, api and e2e each get an **attributable** number rather than a cumulative one. The
+"All surfaces" column is their *union* — what running them together achieves, which is less than
+their sum wherever two surfaces cover the same statement.
+
+Three things that are easy to get wrong, and what they look like when you do:
+
+- **`CONFIG_LOCAL=data/config/overlay.none.json`.** Your `config.local.json` is applied on top of
+  whichever config you name, and it usually points `esignet.base_url` at a deployed environment.
+  Without suppressing it the traffic goes there while the counters come from the local binary, and
+  the panel reports a server nothing touched.
+- **`ADMIN_TOKEN`.** A locally started server installs no scope middleware (that needs both
+  `ISSUER_URL` and `JWKS_URL`), so it never inspects the admin bearer — but the client-mgmt
+  scenarios still need *a* token to present. Without this they are gated out as `ENV_NOT_READY`
+  and `internal/clientmgmt` reads near zero. It is a deliberate opt-in, not a fallback when
+  Keycloak fails, so a real deployment cannot go green on a broken IAM.
+- **`go tool covdata` must be on PATH.** The binary counter format has no public reader, so a
+  container image without the Go toolchain cannot collect. `run-all.sh` checks this before the run
+  rather than after it.
+
+A package reading 0% is usually a statement about the *run*, not the service: `internal/config`
+and `cmd/esignet` execute at boot, before the first reset, and the plugin packages
+(`engine/mosip`, `engine/sunbird`) only move when that plugin is the one configured — which is why
+there is a cover config per plugin.
+
 ---
 
 ## Building

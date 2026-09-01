@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mosip/esignet/api-test/internal/covreport"
 	"github.com/mosip/esignet/api-test/internal/report"
 	"github.com/mosip/esignet/api-test/internal/result"
 )
@@ -17,6 +18,7 @@ func main() {
 	apiPath := flag.String("api", "", "path to the api envelope JSON (godog surfaces)")
 	e2ePath := flag.String("e2e", "", "path to the e2e envelope JSON (optional)")
 	confPath := flag.String("conformance", "", "path to a conformance sidecar JSON (optional)")
+	covPath := flag.String("coverage", "", "path to the coverage summary JSON written by cmd/covreport (optional)")
 	outDir := flag.String("out", "out", "report output directory")
 	plan := flag.String("plan", "oidcc-test-plan", "plan name (report header/filename)")
 	plugin := flag.String("plugin", "mock", "plugin/provider the run targeted")
@@ -62,6 +64,17 @@ func main() {
 		log.Fatalf("nothing to consolidate: pass -conformance, -api and/or -e2e")
 	}
 
+	// A -coverage that cannot be read is fatal rather than skipped: the caller
+	// asked for a coverage report, and rendering one silently without the panel
+	// would read as "this run measured nothing".
+	var cov *covreport.Report
+	if *covPath != "" {
+		var err error
+		if cov, err = loadCoverage(*covPath); err != nil {
+			log.Fatalf("load coverage %s: %v", *covPath, err)
+		}
+	}
+
 	// Stamp defaults so pre-existing/plain rows still group correctly.
 	for i := range rows {
 		if rows[i].Plugin == "" {
@@ -83,6 +96,7 @@ func main() {
 		PlanConfigs: planConfigs,
 		ShowSecrets: *showSecrets,
 		Results:     rows,
+		Coverage:    cov,
 	})
 	if err != nil {
 		log.Fatalf("write report: %v", err)
@@ -138,6 +152,24 @@ func loadEnvelope(path string) ([]result.ModuleResult, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// loadCoverage reads the summary cmd/covreport wrote. A file naming no surfaces
+// is rejected: it would render an empty panel that looks like a measurement
+// rather than a collection that produced nothing.
+func loadCoverage(path string) (*covreport.Report, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rep covreport.Report
+	if err := json.Unmarshal(data, &rep); err != nil {
+		return nil, err
+	}
+	if len(rep.Surfaces) == 0 {
+		return nil, fmt.Errorf("names no surfaces")
+	}
+	return &rep, nil
 }
 
 // plansFromRows lists the distinct plans the rows came from, in first-seen

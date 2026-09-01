@@ -129,6 +129,11 @@ func exports(c *config.Config) string {
 	// consolidate takes this as a flag rather than reading the config; run-all.sh
 	// forwards it from here.
 	kv("DEBUG_SHOW_SECRETS", strconv.FormatBool(c.Run.DebugShowSecrets))
+
+	// run-all.sh brackets each surface with these when coverage is on.
+	kv("COVERAGE", strconv.FormatBool(c.Run.Coverage.Enabled))
+	kv("COVERAGE_CONTROL_URL", c.Run.Coverage.ControlURL)
+	kv("COVERAGE_DIR", c.Run.Coverage.Dir)
 	return b.String()
 }
 
@@ -149,6 +154,10 @@ func printCheck(c *config.Config, path string) {
 	if !c.Esignet.TLSVerify {
 		fmt.Printf("\n!! esignet.tls_verify is OFF — identities, OTPs and passwords will be sent\n")
 		fmt.Printf("!! to %s without certificate verification.\n", orDash(c.Esignet.BaseURL))
+	}
+	if c.Run.Coverage.Enabled {
+		fmt.Printf("coverage  on — control %s, snapshots to %s\n", c.Run.Coverage.ControlURL, c.Run.Coverage.Dir)
+		fmt.Printf("          (needs a build-cover server started with GOCOVERDIR=%s)\n", c.Run.Coverage.Dir)
 	}
 	if c.Run.DebugShowSecrets {
 		fmt.Printf("\n!! run.debug_show_secrets is ON — the report will contain unredacted\n")
@@ -190,7 +199,11 @@ func printCheck(c *config.Config, path string) {
 	if c.HasSurface(config.SurfaceAPI) {
 		fmt.Printf("\napi\n")
 		fmt.Printf("  tags        %s\n", orDefault(c.API.Tags, "(auto — chosen from configured credentials)"))
-		fmt.Printf("  client-mgmt %s\n", readiness(c.Keycloak.ClientSecret != "", "ENV_NOT_READY: no keycloak.client_secret"))
+		// ADMIN_TOKEN stands in for the Keycloak round-trip against a target that
+		// does not enforce scope, so it counts as admin auth here too — otherwise
+		// --check would report client-mgmt gated out on a run where it executes.
+		adminAuth := c.Keycloak.ClientSecret != "" || os.Getenv("ADMIN_TOKEN") != ""
+		fmt.Printf("  client-mgmt %s\n", readiness(adminAuth, "ENV_NOT_READY: no keycloak.client_secret and no ADMIN_TOKEN"))
 		fmt.Printf("  authz-neg   %s\n", readiness(c.API.FlowClientID != "", "ENV_NOT_READY: no api.flow_client_id"))
 	}
 

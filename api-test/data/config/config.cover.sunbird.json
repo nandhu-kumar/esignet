@@ -1,0 +1,104 @@
+{
+  "_comment": [
+    "sunbird plugin, run against a LOCAL coverage-instrumented esignet-service.",
+    "The mock twin is config.cover.mock.json; read its comment for the server",
+    "start-up line, why the address is host.docker.internal, and why",
+    "CONFIG_LOCAL=data/config/overlay.none.json is needed.",
+    "",
+    "  cd ../api-test && CONFIG_LOCAL=data/config/overlay.none.json \\",
+    "    ./run-all.sh -c data/config/config.cover.sunbird.json",
+    "",
+    "sunbird authenticates by knowledge (KBI), so identity.individual_id and",
+    "knowledge.{full_name,dob} name a real row in the registry the local server is",
+    "pointed at. These are the reference identity already used against the",
+    "released registry by the esqa-sunbird deployment profile -- not invented",
+    "here, and not this run's own secret, so committed directly the same way",
+    "config.mock.json commits its seed identity.",
+    "",
+    "The local server must actually be running the sunbird plugin",
+    "(MOSIP_ESIGNET_AUTHN_PROVIDER=sunbird) with",
+    "MOSIP_ESIGNET_AUTHENTICATOR_SUNBIRD_RC_AUTH_FACTOR_KBI_REGISTRY_SEARCH_URL",
+    "and ..._REGISTRY_GET_URL pointed at https://registry.released.mosip.net/api/v1/Insurance/",
+    "(see esignet-service/.env.example) -- these are esignet-service-side settings,",
+    "not something the harness itself calls, so api-test carries none of them.",
+    "Without them the surfaces report ENV_NOT_READY/failures at runtime and the",
+    "coverage panel shows internal/engine/sunbird untouched. The registry is a",
+    "public HTTPS endpoint; no VPN/cluster access needed to reach it.",
+    "",
+    "Conformance plans point at the .local.json copies seed-conformance writes --",
+    "same clients, same server as the mock cover config, since client-mgmt",
+    "registration is plugin-agnostic."
+  ],
+  "conformance": {
+    "base_url": "https://localhost.emobix.co.uk:8443",
+    "tls_verify": false
+  },
+  "plans": [
+    {
+      "name": "oidcc-test-plan",
+      "variant": {
+        "client_auth_type": "private_key_jwt",
+        "response_type": "code",
+        "response_mode": "default",
+        "client_registration": "static_client"
+      },
+      "config_file": "conformance-suite-private/esignet-config.local.json"
+    },
+    {
+      "name": "fapi2-security-profile-final-test-plan",
+      "variant": {
+        "client_auth_type": "private_key_jwt",
+        "sender_constrain": "dpop",
+        "authorization_request_type": "simple",
+        "openid": "openid_connect",
+        "fapi_profile": "plain_fapi"
+      },
+      "config_file": "conformance-suite-private/esignet-fapi2-config.local.json",
+      "profile": "full"
+    }
+  ],
+  "keycloak": {
+    "client_id": "mosip-pms-client"
+  },
+  "esignet": {
+    "base_url": "http://esignet:8088",
+    "provider": "sunbird",
+    "auth_factor": "kbi",
+    "identity": {
+      "individual_id": "950523258",
+      "id_type": "uin"
+    },
+    "knowledge": {
+      "full_name": "rohith",
+      "dob": "2000-09-09"
+    },
+    "otp": {
+      "source": "static",
+      "value": "111111"
+    }
+  },
+  "api": {
+    "tags": "",
+    "flow_client_id": "Test-postman-client-199"
+  },
+  "e2e": {
+    "spec": "data/scenarios/e2e-scenarios-sunbird.json",
+    "auth_factors": [],
+    "include": [],
+    "exclude": []
+  },
+  "run": {
+    "surfaces": [
+      "conformance",
+      "api",
+      "e2e"
+    ],
+    "profile": "full",
+    "debug_show_secrets": false,
+    "coverage": {
+      "enabled": true,
+      "control_url": "http://esignet:8088",
+      "dir": "out/covdata"
+    }
+  }
+}

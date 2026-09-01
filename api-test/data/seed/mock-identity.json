@@ -1,0 +1,18 @@
+{
+  "individualId": "8267411574",
+  "pin": "111111",
+  "password": "Mosip@123",
+  "preferredLang": "eng",
+  "dateOfBirth": "1990/01/01",
+  "postalCode": "45009",
+  "encodedPhoto": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "email": "decl-user-1@mosip.net",
+  "phone": "8267411574",
+  "fullName": [{ "language": "eng", "value": "Test User One" }],
+  "givenName": [{ "language": "eng", "value": "Test" }],
+  "familyName": [{ "language": "eng", "value": "User One" }],
+  "gender": [{ "language": "eng", "value": "Male" }],
+  "locality": [{ "language": "eng", "value": "Bangalore" }],
+  "region": [{ "language": "eng", "value": "Karnataka" }],
+  "country": [{ "language": "eng", "value": "India" }]
+}

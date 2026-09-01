@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mosip/esignet/api-test/internal/covreport"
 	"github.com/mosip/esignet/api-test/internal/result"
 	"github.com/mosip/esignet/api-test/internal/textx"
 )
@@ -26,6 +27,45 @@ type view struct {
 	ShowSecrets bool           // wire trace left unredacted (run.debug_show_secrets)
 	Summary     result.Summary // overall roll-up across every surface
 	Surfaces    []surfaceView  // one section per surface/plan (plan doc §6)
+	Coverage    *coverageView  // nil unless this was a coverage run
+}
+
+// coverageView is the coverage panel: one column per surface plus a combined
+// column, over rows of esignet-service packages.
+type coverageView struct {
+	Generated string
+	Module    string
+	// Columns are the surfaces in run order, then "combined" — the union, which
+	// is what running all the surfaces together achieves. It is last because it
+	// is the summary of the columns before it, not a peer of them.
+	Columns []coverageColumn
+	Rows    []coverageRow
+}
+
+// coverageColumn is one column header plus its whole-service total.
+type coverageColumn struct {
+	Label    string
+	Combined bool // the union column, styled apart from the per-surface ones
+	Percent  string
+	Bar      string // width percentage for the inline bar
+	Class    string
+	Detail   string // "1234/5678 statements"
+}
+
+// coverageRow is one package's coverage across the same columns.
+type coverageRow struct {
+	Package string
+	Total   int
+	Cells   []coverageCell
+}
+
+// coverageCell is one package/column intersection.
+type coverageCell struct {
+	Combined bool
+	Percent  string
+	Bar      string
+	Class    string
+	Detail   string
 }
 
 // surfaceView is one surface's section: its label, own tile counts, and rows.
@@ -127,6 +167,12 @@ type Options struct {
 	// ShowSecrets leaves the captured eSignet wire trace unredacted for local debugging.
 	ShowSecrets bool
 	Results     []result.ModuleResult
+
+	// Coverage is how much of esignet-service this run exercised, per surface
+	// and combined. Nil when the run was not a coverage run (the common case),
+	// in which case no coverage panel is rendered — an absent measurement must
+	// not read as a measured zero.
+	Coverage *covreport.Report
 }
 
 // Write emits <dir>/<plan>_<provider>_<ts>_t-<n>_p-<n>_f-<n>_sk-<n>_ki-<n>.{html,json}
@@ -194,6 +240,7 @@ func Write(o Options) (string, error) {
 		PlanConfigs: o.PlanConfigs,
 		ShowSecrets: showSecrets,
 		Summary:     sum,
+		Coverage:    toCoverageView(o.Coverage),
 	}
 	// Name the plan in a section heading only when the run covered more than one:
 	// a single-plan report already says which plan in its header.
@@ -237,6 +284,94 @@ func Write(o Options) (string, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// coverageLabels give the run-all.sh surface names their report headings. The
+// api snapshot spans both godog surfaces (client-mgmt and flow/execute run in
+// one process, so their counters cannot be told apart) — the heading says so
+// rather than letting a reader match it to just one of the two sections below.
+var coverageLabels = map[string]string{
+	"conformance": "Conformance",
+	"api":         "API (client-mgmt + flow/execute)",
+	"e2e":         "End-to-end",
+}
+
+// toCoverageView shapes the collector's report for the template. Returns nil for
+// a run that measured nothing, which renders no panel at all.
+func toCoverageView(r *covreport.Report) *coverageView {
+	if r == nil || len(r.Surfaces) == 0 {
+		return nil
+	}
+	v := &coverageView{Generated: r.Generated, Module: r.Module}
+
+	for i, s := range r.Surfaces {
+		label := coverageLabels[s]
+		if label == "" {
+			label = s
+		}
+		v.Columns = append(v.Columns, coverageColumn{
+			Label:   label,
+			Percent: pct(r.Totals[i].Percent),
+			Bar:     bar(r.Totals[i].Percent),
+			Class:   coverageClass(r.Totals[i].Percent),
+			Detail:  fmt.Sprintf("%d/%d statements", r.Totals[i].Covered, r.Totals[i].Total),
+		})
+	}
+	v.Columns = append(v.Columns, coverageColumn{
+		Label:    "All surfaces",
+		Combined: true,
+		Percent:  pct(r.Overall.Percent),
+		Bar:      bar(r.Overall.Percent),
+		Class:    coverageClass(r.Overall.Percent),
+		Detail:   fmt.Sprintf("%d/%d statements", r.Overall.Covered, r.Overall.Total),
+	})
+
+	for _, p := range r.Packages {
+		row := coverageRow{Package: r.ShortName(p.Name), Total: p.Overall.Total}
+		for _, st := range p.BySurface {
+			row.Cells = append(row.Cells, coverageCell{
+				Percent: pct(st.Percent),
+				Bar:     bar(st.Percent),
+				Class:   coverageClass(st.Percent),
+				Detail:  fmt.Sprintf("%d/%d", st.Covered, st.Total),
+			})
+		}
+		row.Cells = append(row.Cells, coverageCell{
+			Combined: true,
+			Percent:  pct(p.Overall.Percent),
+			Bar:      bar(p.Overall.Percent),
+			Class:    coverageClass(p.Overall.Percent),
+			Detail:   fmt.Sprintf("%d/%d", p.Overall.Covered, p.Overall.Total),
+		})
+		v.Rows = append(v.Rows, row)
+	}
+	return v
+}
+
+func pct(f float64) string { return fmt.Sprintf("%.1f%%", f) }
+
+// bar is the inline bar's width. Sub-1% coverage still gets a visible sliver, so
+// "barely touched" is distinguishable at a glance from "never entered".
+func bar(f float64) string {
+	if f > 0 && f < 1 {
+		return "1%"
+	}
+	return fmt.Sprintf("%.0f%%", f)
+}
+
+// coverageClass buckets a percentage for colouring. The thresholds are a reading
+// aid, not a policy: nothing in the harness passes or fails on them.
+func coverageClass(f float64) string {
+	switch {
+	case f >= 70:
+		return "pass"
+	case f >= 40:
+		return "warn"
+	case f > 0:
+		return "fail"
+	default:
+		return "zero"
+	}
 }
 
 // planLabel is the header text for the plans a run covered: all of them, joined,
@@ -923,6 +1058,25 @@ const reportHTML = `<!doctype html>
   .expand-btn:hover { color:var(--fg); }
   .toolbar { display:flex; gap:8px; margin:0 0 16px; flex-wrap:wrap; }
   .tablewrap { overflow-x:auto; }
+  /* coverage panel */
+  .cov-tiles { display:flex; gap:12px; flex-wrap:wrap; margin:4px 0 14px; }
+  .cov-tile { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:10px 14px; min-width:150px; }
+  .cov-tile.combined { border-color:var(--fg); }
+  .cov-tile .l { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .cov-tile .n { font-size:20px; font-weight:700; margin:2px 0 1px; }
+  .cov-tile .d { color:var(--muted); font-size:11px; }
+  .cov-tile .n.pass{color:var(--pass)} .cov-tile .n.warn{color:var(--warn)}
+  .cov-tile .n.fail{color:var(--fail)} .cov-tile .n.zero{color:var(--muted)}
+  .covtable td, .covtable th { vertical-align:middle; }
+  .covtable th.combined, .covtable td.combined { border-left:1px solid var(--line); }
+  .cov-cell { display:flex; align-items:center; gap:8px; min-width:104px; }
+  .cov-num { font:12px/1 ui-monospace,Consolas,monospace; min-width:44px; text-align:right; }
+  .cov-num.pass{color:var(--pass)} .cov-num.warn{color:var(--warn)}
+  .cov-num.fail{color:var(--fail)} .cov-num.zero{color:var(--muted)}
+  .cov-bar { flex:1; height:6px; border-radius:3px; background:var(--line); overflow:hidden; min-width:40px; }
+  .cov-bar i { display:block; height:100%; }
+  .cov-bar i.pass{background:var(--pass)} .cov-bar i.warn{background:var(--warn)}
+  .cov-bar i.fail{background:var(--fail)} .cov-bar i.zero{background:transparent}
   table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
   th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
   th { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
@@ -1027,6 +1181,53 @@ const reportHTML = `<!doctype html>
       <pre>{{.JSON}}</pre>
       {{end}}
     {{end}}
+  </details>
+  {{end}}
+
+  {{with .Coverage}}
+  <details class="panel" open>
+    <summary>esignet-service coverage — what each surface exercised</summary>
+    <p class="muted" style="font-size:12px; margin:8px 0 4px">
+      Statement coverage of <span class="mono">{{.Module}}</span>, measured on the
+      instrumented server while each surface ran. Every surface's counters were reset
+      before it started, so the columns are attributable rather than cumulative;
+      <strong>All surfaces</strong> is their union — what running them together
+      achieves, which is less than their sum wherever two surfaces cover the same
+      statement. The OIDC engine lives in a separate module and is not counted.
+      {{if .Generated}}<br>Collected {{.Generated}}.{{end}}
+    </p>
+    <div class="cov-tiles">
+      {{range .Columns}}
+      <div class="cov-tile{{if .Combined}} combined{{end}}">
+        <div class="l">{{.Label}}</div>
+        <div class="n {{.Class}}">{{.Percent}}</div>
+        <div class="d">{{.Detail}}</div>
+      </div>
+      {{end}}
+    </div>
+    <div class="tablewrap">
+    <table class="covtable">
+      <thead><tr>
+        <th>Package</th>
+        {{range .Columns}}<th{{if .Combined}} class="combined"{{end}}>{{.Label}}</th>{{end}}
+      </tr></thead>
+      <tbody>
+      {{range .Rows}}
+        <tr>
+          <td class="mono">{{.Package}} <span class="muted">({{.Total}} stmt)</span></td>
+          {{range .Cells}}
+          <td{{if .Combined}} class="combined"{{end}}>
+            <div class="cov-cell" title="{{.Detail}} statements">
+              <span class="cov-bar"><i class="{{.Class}}" style="width:{{.Bar}}"></i></span>
+              <span class="cov-num {{.Class}}">{{.Percent}}</span>
+            </div>
+          </td>
+          {{end}}
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    </div>
   </details>
   {{end}}
 

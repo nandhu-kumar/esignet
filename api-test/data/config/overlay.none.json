@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "An intentionally empty overlay. Pass it as CONFIG_LOCAL to suppress the",
+    "default one (config.local.json, picked up automatically from beside the",
+    "selected config) without deleting or renaming it:",
+    "",
+    "  CONFIG_LOCAL=data/config/overlay.none.json ./run-all.sh -c <config>",
+    "",
+    "The coverage configs need this. config.local.json normally points",
+    "esignet.base_url at a deployed environment, and it is applied on top of",
+    "whichever config you name -- so a local coverage run would send its traffic",
+    "there while snapshotting the counters of the local instrumented binary, and",
+    "report a measurement of a server nothing touched.",
+    "",
+    "CONFIG_LOCAL is required to exist and to parse when set, which is why this is",
+    "a real file rather than /dev/null (which is `nul` on Windows and parses as",
+    "empty input, not as an empty object)."
+  ]
+}
