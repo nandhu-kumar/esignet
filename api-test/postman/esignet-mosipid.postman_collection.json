@@ -36,18 +36,34 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
+            ],
             "body": {
               "mode": "urlencoded",
               "urlencoded": [
-                { "key": "grant_type", "value": "client_credentials" },
-                { "key": "client_id", "value": "{{keycloak_client_id}}" },
-                { "key": "client_secret", "value": "{{keycloak_client_secret}}" }
+                {
+                  "key": "grant_type",
+                  "value": "client_credentials"
+                },
+                {
+                  "key": "client_id",
+                  "value": "{{keycloak_client_id}}"
+                },
+                {
+                  "key": "client_secret",
+                  "value": "{{keycloak_client_secret}}"
+                }
               ]
             },
             "url": {
               "raw": "{{keycloak_token_url}}",
-              "host": ["{{keycloak_token_url}}"]
+              "host": [
+                "{{keycloak_token_url}}"
+              ]
             },
             "description": "Client-credentials grant. The token goes to PMS as a COOKIE named Authorization, not a Bearer header - MOSIP kernel services answer KER-ATH-401 to the header form."
           }
@@ -70,7 +86,7 @@
                   "  const code = b.errors[0].errorCode;",
                   "  console.error('PMS rejected: ' + code + ' - ' + b.errors[0].message);",
                   "  if (code === 'KER-ATH-403') console.error('The token lacks the AUTH_PARTNER realm role.');",
-                  "  if (code === 'PMS_ESI_001') console.error('That public key is already registered - put a NEW modulus in client_public_key_n.');",
+                  "  if (code === 'PMS_ESI_001') console.error('That modulus is already registered - put a NEW modulus in client_public_key_n.');",
                   "  pm.test('client created', () => pm.expect.fail(code));",
                   "} else {",
                   "  const id = b.response.clientId;",
@@ -85,31 +101,56 @@
           "request": {
             "method": "POST",
             "header": [
-              { "key": "Content-Type", "value": "application/json" },
-              { "key": "Cookie", "value": "Authorization={{admin_token}}" }
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Cookie",
+                "value": "Authorization={{admin_token}}"
+              }
             ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
-              "raw": "{\n  \"id\": \"mosip.pms.create.oidc.client.post\",\n  \"version\": \"1.0\",\n  \"requestTime\": \"{{$isoTimestamp}}\",\n  \"metadata\": {},\n  \"request\": {\n    \"name\": \"postman manual test\",\n    \"policyId\": \"{{policy_id}}\",\n    \"authPartnerId\": \"{{auth_partner_id}}\",\n    \"publicKey\": {\n      \"kty\": \"RSA\",\n      \"e\": \"AQAB\",\n      \"use\": \"sig\",\n      \"alg\": \"RS256\",\n      \"n\": \"{{client_public_key_n}}\"\n    },\n    \"logoUri\": \"https://example.org/logo.png\",\n    \"redirectUris\": [\"{{redirect_uri}}\"],\n    \"grantTypes\": [\"authorization_code\"],\n    \"clientAuthMethods\": [\"private_key_jwt\"],\n    \"clientNameLangMap\": { \"eng\": \"postman manual test\" }\n  }\n}"
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"id\": \"mosip.pms.create.oidc.client.post\",\n  \"version\": \"1.0\",\n  \"requestTime\": \"{{$isoTimestamp}}\",\n  \"metadata\": {},\n  \"request\": {\n    \"name\": \"postman manual test\",\n    \"policyId\": \"{{policy_id}}\",\n    \"authPartnerId\": \"{{auth_partner_id}}\",\n    \"publicKey\": {{client_public_jwk}},\n    \"logoUri\": \"https://example.org/logo.png\",\n    \"redirectUris\": [\"{{redirect_uri}}\"],\n    \"grantTypes\": [\"authorization_code\"],\n    \"clientAuthMethods\": [\"private_key_jwt\"],\n    \"clientNameLangMap\": { \"eng\": \"postman manual test\" }\n  }\n}"
             },
             "url": {
               "raw": "{{pms_base}}/oidc-clients",
-              "host": ["{{pms_base}}"],
-              "path": ["oidc-clients"]
+              "host": [
+                "{{pms_base}}"
+              ],
+              "path": [
+                "oidc-clients"
+              ]
             },
-            "description": "Registers a client bound to an onboarded partner and a published policy - the binding IDA requires.\n\nEvery client needs its OWN public key; reusing one gives PMS_ESI_001 'Client public key already exists'. Generate a fresh modulus:\n\n  openssl genrsa -out k.pem 2048\n  openssl rsa -in k.pem -noout -modulus | sed 's/Modulus=//' | xxd -r -p | base64 -w0 | tr '+/' '-_' | tr -d '='\n\nand paste it into client_public_key_n.\n\nThe private half is never sent here. You need it only to sign a private_key_jwt assertion at the token endpoint - the login flow in folder 2 does not, so a manual OTP test works without it.\n\n/oauth/client is an alternative endpoint needing no AUTH_PARTNER role. Both produce clients IDA accepts once propagated."
+            "description": "Registers a client bound to an onboarded partner and a published policy.\n\nSet client_public_jwk to a COMPLETE public JWK object, not just the modulus. Easiest source is https://mkjwk.org - RSA, 2048, Signature, RS256, Key ID SHA-256 - then copy the 'Public Key' panel (the right-hand one) and paste it whole. Keep the private half from the left panel if you intend to sign a private_key_jwt assertion at the token endpoint; the login flow in folder 2 does not need it, so a manual OTP test works without it.\n\nThe JWK should include kid. It is NOT what makes IDA accept the client - a client registered without kid authenticates fine - but the Go harness emits one (internal/e2e/crypto.go, publicJWK), so matching it keeps manual and automated clients comparable when you are diffing behaviour between them.\n\nEvery client needs its OWN modulus; reusing one gives PMS_ESI_001 'Client public key already exists'. PMS dedupes on n, not on kid, so re-pasting an old key under a new kid is still rejected.\n\nIf the client registers ACTIVE but every OTP attempt returns IDA-MLC-007, suspect the PMS->IDA websub delivery. That event is LOST rather than queued, so a client created while it is down is permanently unusable and waiting does not help - register a fresh one once it is healthy. A NEW client that works while an OLDER one still fails is the signature of that outage.\n\n/oauth/client is an alternative endpoint needing no AUTH_PARTNER role."
           }
         },
         {
           "name": "Get client (PMS)",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Cookie", "value": "Authorization={{admin_token}}" }],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "Authorization={{admin_token}}"
+              }
+            ],
             "url": {
               "raw": "{{pms_base}}/oauth/client/{{client_id}}",
-              "host": ["{{pms_base}}"],
-              "path": ["oauth", "client", "{{client_id}}"]
+              "host": [
+                "{{pms_base}}"
+              ],
+              "path": [
+                "oauth",
+                "client",
+                "{{client_id}}"
+              ]
             },
             "description": "Shows relyingPartyId, policyId, status, claims and acrValues.\n\nBeware: two clients can look identical here and still behave differently at IDA, purely because one is older. This view cannot tell you whether IDA has picked a client up."
           }
@@ -121,10 +162,131 @@
             "header": [],
             "url": {
               "raw": "{{esignet_base}}/client-mgmt/client/{{client_id}}",
-              "host": ["{{esignet_base}}"],
-              "path": ["client-mgmt", "client", "{{client_id}}"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "client-mgmt",
+                "client",
+                "{{client_id}}"
+              ]
             },
             "description": "Confirms PMS pushed the client through to eSignet. Returns clientId and status only - and status here does NOT predict whether IDA will authenticate it."
+          }
+        },
+        {
+          "name": "Patch OIDC client status (eSignet)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.errors && b.errors.length) {",
+                  "  const code = b.errors[0].errorCode;",
+                  "  console.error('PATCH rejected: ' + code + ' - ' + b.errors[0].message);",
+                  "  pm.test('client patched', () => pm.expect.fail(code));",
+                  "} else {",
+                  "  const status = b.response.status;",
+                  "  pm.test('status echoed back as INACTIVE', () => pm.expect(status).to.eql('INACTIVE'));",
+                  "  console.warn('PATCH only flips the stored status field - it does NOT stop the client. An INACTIVE client still completes authorize/token/userinfo against this deployment; see the flow-execute inactive-client scenarios.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"id\": \"mosip.esignet.patch.oidc.client\",\n  \"version\": \"1.0\",\n  \"requestTime\": \"{{$isoTimestamp}}\",\n  \"metadata\": {},\n  \"request\": {\n    \"status\": \"INACTIVE\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{esignet_base}}/client-mgmt/client/{{client_id}}",
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "client-mgmt",
+                "client",
+                "{{client_id}}"
+              ]
+            },
+            "description": "PATCH /client-mgmt/client/{client_id} - unlike PUT (Update client), this only touches the fields named in the request body; a patch naming other fields leaves status untouched, and a patch naming only status leaves everything else untouched.\n\nSends Bearer {{admin_token}}, not the Cookie form PMS wants - this route sits behind eSignet's own ScopeMiddleware, which reads Authorization: Bearer <jwt> and checks a configured scope, not the Keycloak-session cookie PMS expects.\n\nBody shown here flips the client to INACTIVE - the operator kill switch for a retired/compromised/offboarded relying party. Re-run with \"status\": \"ACTIVE\" to reactivate (idempotent either way). Other patchable fields: clientName, clientNameLangMap, logoUri, redirectUris, userClaims, authContextRefs, grantTypes, clientAuthMethods, additionalConfig, encPublicKey (send JSON null to clear it).\n\nDo NOT run this against {{client_id}} if that variable points at the shared/aged client folder 2 depends on - it flips real state and folder 2's login will start failing for reasons that look unrelated. Prefer running it against {{new_client_id}} from 'Create OIDC client' instead, or override client_id at the request level."
+          }
+        },
+        {
+          "name": "Patch OIDC client additionalConfig (PAR/DPoP/PKCE)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json();",
+                  "if (b.errors && b.errors.length) {",
+                  "  const code = b.errors[0].errorCode;",
+                  "  console.error('PATCH rejected: ' + code + ' - ' + b.errors[0].message);",
+                  "  if (code === 'invalid_additional_config') console.error('Check the key names/types - see allowedAdditionalConfigKeys in clientmgmt/validate.go. All three protocol flags here must be JSON booleans.');",
+                  "  pm.test('additionalConfig patched', () => pm.expect.fail(code));",
+                  "} else {",
+                  "  pm.test('no error', () => pm.expect(b.errors).to.be.undefined);",
+                  "  console.warn('additionalConfig is a whole-object REPLACE, not a merge: any key not in this body (userinfo_response_type, purpose, allowed_authorization_scopes, ...) is dropped, not preserved. Re-send the full set together if the client already has other additionalConfig keys set.');",
+                  "  console.warn('Neither this response nor GET /client-mgmt/client/{id} echoes additionalConfig back - ClientResponse.APIResponse() only ever returns clientId and status. There is no way to verify PAR/DPoP/PKCE landed through this API; confirm behaviourally (PAR at /oauth2/par, DPoP proof at /oauth2/token, PKCE code_verifier at /oauth2/token) instead.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_token}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"id\": \"mosip.esignet.patch.oidc.client\",\n  \"version\": \"1.0\",\n  \"requestTime\": \"{{$isoTimestamp}}\",\n  \"metadata\": {},\n  \"request\": {\n    \"additionalConfig\": {\n      \"require_pushed_authorization_requests\": true,\n      \"dpop_bound_access_tokens\": true,\n      \"require_pkce\": true\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{esignet_base}}/client-mgmt/client/{{client_id}}",
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "client-mgmt",
+                "client",
+                "{{client_id}}"
+              ]
+            },
+            "description": "Turns on the three per-client protocol switches in one PATCH: require_pushed_authorization_requests (PAR), dpop_bound_access_tokens (DPoP), require_pkce (PKCE). All three are plain JSON booleans; set any of them false instead of omitting to turn it back off - omitting the whole additionalConfig key is what leaves it alone, omitting one key INSIDE it does not.\n\nallowedAdditionalConfigKeys also has: userinfo_response_type, id_token_response_type (\"JWS\"|\"JWE\"), consent_expire_in_mins (>=10), signup_banner_required, forgot_pwd_link_required, purpose, allowed_authorization_scopes. If the client already has any of these set and you only want to flip PAR/DPoP/PKCE, fetch them first (there is currently no read path for additionalConfig - see the test script) or track what you set at creation, then resend the complete object; a partial body here silently drops the rest.\n\nSame client_id caution as the status patch alongside it: point this at {{new_client_id}}, not the shared client folder 2 relies on."
           }
         }
       ]
@@ -134,7 +296,9 @@
       "item": [
         {
           "name": "2.1 Authorize",
-          "protocolProfileBehavior": { "followRedirects": false },
+          "protocolProfileBehavior": {
+            "followRedirects": false
+          },
           "event": [
             {
               "listen": "test",
@@ -159,16 +323,42 @@
             "header": [],
             "url": {
               "raw": "{{esignet_base}}/oauth2/authorize?client_id={{client_id}}&redirect_uri={{redirect_uri}}&response_type=code&scope=openid&state=pm-state&nonce=pm-nonce&acr_values=mosip:idp:acr:generated-code",
-              "host": ["{{esignet_base}}"],
-              "path": ["oauth2", "authorize"],
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "oauth2",
+                "authorize"
+              ],
               "query": [
-                { "key": "client_id", "value": "{{client_id}}" },
-                { "key": "redirect_uri", "value": "{{redirect_uri}}" },
-                { "key": "response_type", "value": "code" },
-                { "key": "scope", "value": "openid" },
-                { "key": "state", "value": "pm-state" },
-                { "key": "nonce", "value": "pm-nonce" },
-                { "key": "acr_values", "value": "mosip:idp:acr:generated-code" }
+                {
+                  "key": "client_id",
+                  "value": "{{client_id}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "{{redirect_uri}}"
+                },
+                {
+                  "key": "response_type",
+                  "value": "code"
+                },
+                {
+                  "key": "scope",
+                  "value": "openid"
+                },
+                {
+                  "key": "state",
+                  "value": "pm-state"
+                },
+                {
+                  "key": "nonce",
+                  "value": "pm-nonce"
+                },
+                {
+                  "key": "acr_values",
+                  "value": "mosip:idp:acr:generated-code"
+                }
               ]
             },
             "description": "Redirects are deliberately NOT followed - the executionId lives in the Location header.\n\nredirect_uri must exactly match one registered for the client, or eSignet answers 'Invalid redirect URI' before the flow starts."
@@ -192,16 +382,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
               "raw": "{\n  \"executionId\": \"{{execution_id}}\"\n}"
             },
             "url": {
               "raw": "{{esignet_base}}/flow/execute",
-              "host": ["{{esignet_base}}"],
-              "path": ["flow", "execute"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "flow",
+                "execute"
+              ]
             },
             "description": "First view: pick an authentication factor. Offers acr_otp and acr_bio."
           }
@@ -225,16 +429,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
               "raw": "{\n  \"executionId\": \"{{execution_id}}\",\n  \"action\": \"acr_otp\",\n  \"challengeToken\": \"{{challenge_token}}\"\n}"
             },
             "url": {
               "raw": "{{esignet_base}}/flow/execute",
-              "host": ["{{esignet_base}}"],
-              "path": ["flow", "execute"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "flow",
+                "execute"
+              ]
             },
             "description": "Lands on the UIN login-id tab by default.\n\nFor a phone or email identity, first POST action 'login_id_mobile' (or login_id_email) to switch tabs. Every tab's submit action is named submit_uin - only nextNode (send_mosip_otp_uin vs send_mosip_otp_mobile) says which identifier kind it actually sends, so submitting a phone on the UIN tab silently sends it as a UIN and IDA rejects it."
           }
@@ -265,16 +483,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
               "raw": "{\n  \"executionId\": \"{{execution_id}}\",\n  \"action\": \"submit_uin\",\n  \"challengeToken\": \"{{challenge_token}}\",\n  \"inputs\": {\n    \"username\": \"{{individual_id}}\",\n    \"captcha_token\": \"{{captcha_token}}\"\n  }\n}"
             },
             "url": {
               "raw": "{{esignet_base}}/flow/execute",
-              "host": ["{{esignet_base}}"],
-              "path": ["flow", "execute"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "flow",
+                "execute"
+              ]
             },
             "description": "Submits the identifier, which makes IDA send the OTP.\n\ncaptcha_token can be any non-empty placeholder while the deployment has no captcha validator configured (MOSIP_ESIGNET_CAPTCHA_VALIDATOR_URL unset). With a validator on, only a real reCAPTCHA token passes and this step fails with 'The captcha token could not be verified'.\n\nNote MOSIP_ESIGNET_CAPTCHA_SITE_KEY and _SITE_PROVIDER must stay SET even when the validator is off - the flow definition substitutes them, and unsetting them makes every authorize fail with server_error."
           }
@@ -308,16 +540,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
               "raw": "{\n  \"executionId\": \"{{execution_id}}\",\n  \"action\": \"action_submit_otp\",\n  \"challengeToken\": \"{{challenge_token}}\",\n  \"inputs\": {\n    \"username\": \"{{individual_id}}\",\n    \"captcha_token\": \"{{captcha_token}}\",\n    \"otp\": \"{{otp}}\"\n  }\n}"
             },
             "url": {
               "raw": "{{esignet_base}}/flow/execute",
-              "host": ["{{esignet_base}}"],
-              "path": ["flow", "execute"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "flow",
+                "execute"
+              ]
             },
             "description": "Set the `otp` variable first - 3 minute validity.\n\nNote username and captcha_token are sent AGAIN alongside otp. Inputs accumulate across the whole flow and every step re-sends all of them. The OTP view declares only `otp`, but submitting just that leaves the auth node with no identity to verify against, and it answers FET-1005 'Invalid credentials provided' as though the code itself were wrong."
           }
@@ -365,16 +611,30 @@
           ],
           "request": {
             "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
             "body": {
               "mode": "raw",
-              "options": { "raw": { "language": "json" } },
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
               "raw": "{\n  \"executionId\": \"{{execution_id}}\",\n  \"action\": \"action_allow\",\n  \"challengeToken\": \"{{challenge_token}}\",\n  \"inputs\": {\n    \"username\": \"{{individual_id}}\",\n    \"captcha_token\": \"{{captcha_token}}\",\n    \"otp\": \"{{otp}}\",\n    \"consent_decisions\": \"{{consent_decisions}}\"\n  }\n}"
             },
             "url": {
               "raw": "{{esignet_base}}/flow/execute",
-              "host": ["{{esignet_base}}"],
-              "path": ["flow", "execute"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "flow",
+                "execute"
+              ]
             },
             "description": "Only needed when 2.5 returned a consent prompt; a client whose consent is already stored goes straight to COMPLETE.\n\nThe pre-request script builds consent_decisions from the stored prompt, approving every essential and optional claim. consent_decisions is a JSON *string*, not a nested object - that is what the executor expects.\n\nTo test denial, edit the script to set approved:false on the elements you want withheld."
           }
@@ -391,8 +651,13 @@
             "header": [],
             "url": {
               "raw": "{{esignet_base}}/.well-known/openid-configuration",
-              "host": ["{{esignet_base}}"],
-              "path": [".well-known", "openid-configuration"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                ".well-known",
+                "openid-configuration"
+              ]
             },
             "description": "Confirms the base URL is right, and shows supported auth methods and signing algorithms."
           }
@@ -404,8 +669,12 @@
             "header": [],
             "url": {
               "raw": "{{esignet_base}}/health",
-              "host": ["{{esignet_base}}"],
-              "path": ["health"]
+              "host": [
+                "{{esignet_base}}"
+              ],
+              "path": [
+                "health"
+              ]
             }
           }
         },
@@ -413,11 +682,21 @@
           "name": "Partner details (PMS)",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Cookie", "value": "Authorization={{admin_token}}" }],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "Authorization={{admin_token}}"
+              }
+            ],
             "url": {
               "raw": "{{pms_base}}/partners/{{auth_partner_id}}",
-              "host": ["{{pms_base}}"],
-              "path": ["partners", "{{auth_partner_id}}"]
+              "host": [
+                "{{pms_base}}"
+              ],
+              "path": [
+                "partners",
+                "{{auth_partner_id}}"
+              ]
             },
             "description": "Confirms the partner exists and is active."
           }
@@ -426,11 +705,21 @@
           "name": "Policy details",
           "request": {
             "method": "GET",
-            "header": [{ "key": "Cookie", "value": "Authorization={{admin_token}}" }],
+            "header": [
+              {
+                "key": "Cookie",
+                "value": "Authorization={{admin_token}}"
+              }
+            ],
             "url": {
               "raw": "{{policy_base}}/policies/{{policy_id}}",
-              "host": ["{{policy_base}}"],
-              "path": ["policies", "{{policy_id}}"]
+              "host": [
+                "{{policy_base}}"
+              ],
+              "path": [
+                "policies",
+                "{{policy_id}}"
+              ]
             },
             "description": "Check status is PUBLISHED and allowedAuthTypes includes otp and otp-request, or the OTP flow cannot work."
           }
@@ -439,12 +728,33 @@
     }
   ],
   "variable": [
-    { "key": "admin_token", "value": "" },
-    { "key": "execution_id", "value": "" },
-    { "key": "challenge_token", "value": "" },
-    { "key": "consent_prompt", "value": "" },
-    { "key": "consent_decisions", "value": "" },
-    { "key": "assertion", "value": "" },
-    { "key": "new_client_id", "value": "" }
+    {
+      "key": "admin_token",
+      "value": ""
+    },
+    {
+      "key": "execution_id",
+      "value": ""
+    },
+    {
+      "key": "challenge_token",
+      "value": ""
+    },
+    {
+      "key": "consent_prompt",
+      "value": ""
+    },
+    {
+      "key": "consent_decisions",
+      "value": ""
+    },
+    {
+      "key": "assertion",
+      "value": ""
+    },
+    {
+      "key": "new_client_id",
+      "value": ""
+    }
   ]
 }
