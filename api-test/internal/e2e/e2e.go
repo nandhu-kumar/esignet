@@ -694,12 +694,12 @@ func (r *Runner) createClientViaPMS(ctx context.Context, calls *[]result.HTTPCal
 		"grantTypes":        []string{"authorization_code"},
 		"clientAuthMethods": []string{"private_key_jwt"},
 	}
-	// PMS owns the client record for the mosip plugin, so whether it forwards
-	// additionalConfig to eSignet is its call, not the harness's. Sending it is
-	// the only way to find out; if PMS drops it, the scenario fails at the
-	// protocol step it configured rather than passing while unhardened, which
-	// is the honest outcome to report.
-	if ac := cl.cfg.additionalConfig(); ac != nil {
+	// PMS silently drops additionalConfig on this endpoint (verified:
+	// round-tripping a client shows the field simply absent), so it is also
+	// sent here in case that ever changes, but the harness does not rely on it
+	// landing this way — see the patchAdditionalConfig call below.
+	ac := cl.cfg.additionalConfig()
+	if ac != nil {
 		request["additionalConfig"] = ac
 	}
 	reqBody := map[string]any{
@@ -750,7 +750,35 @@ func (r *Runner) createClientViaPMS(ctx context.Context, calls *[]result.HTTPCal
 	if resp.Response.ClientID == "" {
 		return "", fmt.Errorf("PMS create client: no clientId in response (HTTP %d): %s", status, snippet(rb))
 	}
+	if ac != nil {
+		if err := r.patchAdditionalConfig(ctx, calls, resp.Response.ClientID, ac); err != nil {
+			return "", fmt.Errorf("PMS created client %s but the eSignet additionalConfig patch failed: %w", resp.Response.ClientID, err)
+		}
+	}
 	return resp.Response.ClientID, nil
+}
+
+// patchAdditionalConfig sets additionalConfig through eSignet's own client-mgmt PATCH, which the engine actually reads for enforcement. No read-back is possible: ClientResponse.APIResponse() (esignet-service/internal/clientmgmt/model.go) strips every field but clientId and status from every client-mgmt response, additionalConfig included, on create/update/patch/get alike — confirmed live against esdev, not inferred. The protocol scenario this client is registered for is therefore the only real proof the patch took; a 2xx with no error code here is as far as this call itself can verify.
+func (r *Runner) patchAdditionalConfig(ctx context.Context, calls *[]result.HTTPCall, clientID string, ac map[string]any) error {
+	body, err := json.Marshal(map[string]any{
+		"requestTime": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"request":     map[string]any{"additionalConfig": ac},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal additionalConfig patch: %w", err)
+	}
+	status, rb, err := r.do(ctx, calls, "patch additionalConfig", http.MethodPatch, r.Base+"/client-mgmt/client/"+clientID,
+		map[string]string{"Content-Type": "application/json", "Authorization": "Bearer " + r.AdminToken}, string(body))
+	if err != nil {
+		return fmt.Errorf("patch additionalConfig: %w", err)
+	}
+	if code := firstErrorCode(rb); code != "" {
+		return fmt.Errorf("patch additionalConfig rejected (HTTP %d): %s", status, code)
+	}
+	if status < 200 || status > 299 {
+		return fmt.Errorf("patch additionalConfig failed (HTTP %d): %s", status, snippet(rb))
+	}
+	return nil
 }
 
 // scenarioConfigError reports why a scenario cannot be run at all, or "" when
